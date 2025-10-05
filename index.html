@@ -49,9 +49,20 @@ async function pollSignal(room, username, onMessage) {
     while(!connected) {
         try {
             const res = await fetch(workerUrl + "?id=" + room);
-            const msgs = await res.json();
+            const text = await res.text();  // get raw response text
+            console.log("Raw response from worker:", text);  // <-- debug
+
+            let msgs;
+            try {
+                msgs = JSON.parse(text);   // try parsing
+            } catch(e) {
+                console.error("Failed to parse JSON:", e);
+                await new Promise(r => setTimeout(r, 1000));
+                continue;  // skip this iteration
+            }
+
             for(const m of msgs) {
-                if(m.from !== username) onMessage(JSON.parse(m));
+                if(m.from !== username) onMessage(m);
             }
         } catch(e){ console.error(e); }
         await new Promise(r => setTimeout(r, 1000));
