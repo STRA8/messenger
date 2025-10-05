@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>P2P Chat Room</title>
+<title>Simple P2P Chat</title>
 <style>
 body { font-family: sans-serif; margin: 20px; }
 .chat-container { max-width: 400px; margin: auto; }
@@ -12,15 +12,16 @@ body { font-family: sans-serif; margin: 20px; }
 .input-group button { width: 100%; padding: 5px; }
 .message { margin: 2px 0; }
 .message.you { font-weight: bold; }
+.message.system { font-style: italic; color: gray; }
 </style>
 </head>
 <body>
 
 <div class="chat-container">
-    <h2 class="chat-title">P2P Chat Room</h2>
+    <h2>P2P Chat Room</h2>
 
     <div class="input-group">
-        <input class="username" type="text" placeholder="Username (visual)">
+        <input class="username" type="text" placeholder="Your name (visual)">
     </div>
     <div class="input-group">
         <input class="room" type="text" placeholder="Room ID">
@@ -47,7 +48,7 @@ const sendBtn = document.querySelector(".send-btn");
 let pc, dc;
 let connected = false;
 let iceQueue = [];
-let isInitiator = false;
+let isHost = false;
 
 function appendMessage(text, type="") {
     const p = document.createElement("p");
@@ -63,16 +64,14 @@ async function sendSignal(room, data) {
             method:"POST",
             body: JSON.stringify(data)
         });
-    } catch(e) { console.error("signal send failed", e); }
+    } catch(e){ console.error("signal send failed", e); }
 }
 
 async function pollSignal(room, username) {
     while(!connected) {
         try {
             const res = await fetch(workerUrl + "?id=" + room);
-            const text = await res.text();
-            let msgs;
-            try { msgs = JSON.parse(text); } catch(e){ await new Promise(r=>setTimeout(r,500)); continue; }
+            const msgs = JSON.parse(await res.text());
 
             for(const m of msgs) {
                 if(m.from === username) continue;
@@ -80,13 +79,11 @@ async function pollSignal(room, username) {
                 if(m.sdp) {
                     if(!pc.currentRemoteDescription) {
                         await pc.setRemoteDescription(new RTCSessionDescription(m.sdp));
-                        // receiver answers if it was an offer
                         if(m.sdp.type === "offer") {
                             const answer = await pc.createAnswer();
                             await pc.setLocalDescription(answer);
                             await sendSignal(room, {sdp: answer, from: username});
                         }
-                        // apply queued ICE after remoteDescription
                         for(const ice of iceQueue) if(ice.candidate) await pc.addIceCandidate(new RTCIceCandidate(ice));
                         iceQueue = [];
                     }
@@ -101,38 +98,38 @@ async function pollSignal(room, username) {
                 }
             }
         } catch(e){ console.error(e); }
-        await new Promise(r=>setTimeout(r,500));
+        await new Promise(r => setTimeout(r, 500));
     }
 }
 
-async function autoConnect() {
+async function startConnection() {
     const username = usernameInput.value.trim();
     const room = roomInput.value.trim();
     if(!username || !room) return;
     if(pc) return;
 
-    // check room messages to decide initiator
+    // Check if room is empty -> first person is host
     const res = await fetch(workerUrl + "?id=" + room);
     const msgs = JSON.parse(await res.text());
-    isInitiator = msgs.length === 0;
+    isHost = msgs.length === 0;
 
     pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
 
-    if(isInitiator) {
+    if(isHost) {
         dc = pc.createDataChannel("chat");
         dc.onmessage = e => appendMessage(e.data);
-        dc.onopen = () => { appendMessage("✅ Connected to room!", "system"); connected = true; };
+        dc.onopen = () => { appendMessage("✅ Connected as host!", "system"); connected = true; };
     } else {
         pc.ondatachannel = e => {
             dc = e.channel;
             dc.onmessage = e => appendMessage(e.data);
-            dc.onopen = () => { appendMessage("✅ Connected to room!", "system"); connected = true; };
+            dc.onopen = () => { appendMessage("✅ Connected as guest!", "system"); connected = true; };
         };
     }
 
     pc.onicecandidate = e => { if(e.candidate) sendSignal(room, {ice:e.candidate, from: username}); }
 
-    if(isInitiator) {
+    if(isHost) {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         await sendSignal(room, {sdp: offer, from: username});
@@ -141,8 +138,9 @@ async function autoConnect() {
     pollSignal(room, username);
 }
 
-usernameInput.addEventListener("input", autoConnect);
-roomInput.addEventListener("input", autoConnect);
+// auto-connect when user fills inputs
+usernameInput.addEventListener("input", startConnection);
+roomInput.addEventListener("input", startConnection);
 
 sendBtn.onclick = () => {
     if(!connected) { appendMessage("⚠️ Not connected yet!", "system"); return; }
