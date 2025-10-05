@@ -17,8 +17,8 @@ input, button { margin: 5px 0; width: 100%; }
 
 <h2>P2P Chat Room</h2>
 
-<label>Username (visual): <input type="text" id="username" placeholder="e.g. Alice"></label>
-<label>Room ID: <input type="text" id="room" placeholder="e.g. abc123"></label>
+<label>Username (visual): <input type="text" id="username" value="Alice"></label>
+<label>Room ID: <input type="text" id="room" value="room123"></label>
 <input type="text" id="message" placeholder="Type your message here">
 <button id="sendBtn">Send</button>
 
@@ -36,8 +36,8 @@ const msgInput = document.getElementById("message");
 let pc, dc;
 let connected = false;
 let isHost = false;
-let autoStarted = false;
 
+// helper to show messages in chat
 function appendMessage(msg, type="message") {
     const p = document.createElement("p");
     p.textContent = msg;
@@ -46,11 +46,15 @@ function appendMessage(msg, type="message") {
     chatDiv.scrollTop = chatDiv.scrollHeight;
 }
 
+// send message to worker
 async function sendSignal(room, data) {
-    try { await fetch(workerUrl + "?id=" + room, {method:"POST", body:JSON.stringify(data)}); }
-    catch(e){ console.error("Signal send failed:", e); }
+    try { 
+        console.log("Sending signal:", data);
+        await fetch(workerUrl + "?id=" + room, {method:"POST", body:JSON.stringify(data)}); 
+    } catch(e){ console.error("Signal send failed:", e); }
 }
 
+// poll worker for messages
 async function pollSignal(room, username, onMessage) {
     while(!connected) {
         try {
@@ -70,81 +74,63 @@ async function pollSignal(room, username, onMessage) {
     }
 }
 
-function startConnection() {
+// main connection function
+async function startConnection() {
     const username = usernameInput.value.trim();
     const room = roomInput.value.trim();
-    if(!username || !room) return;
-    if(autoStarted) return;
-    autoStarted = true;
+    if(!username || !room) { console.log("Username or room empty"); return; }
+    if(pc) return;
+
+    console.log("Starting connection as", isHost ? "host" : "guest");
 
     pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
-    console.log("RTCPeerConnection created");
 
-    // Host creates the data channel
-    if(!isHost) {
+    if(isHost) {
         dc = pc.createDataChannel("chat");
-        dc.onopen = () => { 
-            appendMessage("✅ Connected as host!", "system"); 
-            connected = true; 
-        };
+        dc.onopen = () => { appendMessage("✅ Connected as host!", "system"); connected=true; };
         dc.onmessage = e => appendMessage(e.data, "receiver");
+    } else {
+        pc.ondatachannel = e => {
+            dc = e.channel;
+            dc.onopen = () => { appendMessage("✅ Connected as guest!", "system"); connected=true; };
+            dc.onmessage = ev => appendMessage(ev.data, "receiver");
+        };
     }
 
-    pc.onicecandidate = e => {
-        console.log("ICE candidate:", e.candidate);
+    pc.onicecandidate = e => { 
         if(e.candidate) sendSignal(room, {ice:e.candidate, from: username});
     };
 
-    pc.onconnectionstatechange = () => {
-        console.log("Connection state changed:", pc.connectionState);
-    };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await sendSignal(room, {sdp: offer, from: username});
 
-    // Guest listens for incoming data channel
-    pc.ondatachannel = e => {
-        dc = e.channel;
-        dc.onopen = () => { appendMessage("✅ Connected as guest!", "system"); connected = true; };
-        dc.onmessage = ev => appendMessage(ev.data, "receiver");
-        dc.onclose = () => console.log("Data channel closed");
-    };
-
-    (async () => {
-        if(isHost) {
-            console.log("Hosting room:", room);
-        } else {
-            console.log("Joining room:", room);
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            await sendSignal(room, {sdp: offer, from: username});
-        }
-
-        pollSignal(room, username, async msg => {
-            console.log("Incoming message:", msg);
-
-            if(msg.sdp) {
-                try {
-                    if(!pc.currentRemoteDescription) {
-                        await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-                        console.log("Remote SDP set:", msg.sdp.type);
-                        if(msg.sdp.type === "offer") {
-                            const answer = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-                            await sendSignal(room, {sdp: answer, from: username});
-                        }
+    pollSignal(room, username, async msg => {
+        console.log("Incoming message:", msg);
+        if(msg.sdp) {
+            try {
+                if(!pc.currentRemoteDescription) {
+                    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+                    console.log("Remote SDP set:", msg.sdp.type);
+                    if(msg.sdp.type==="offer" && !isHost) {
+                        const answer = await pc.createAnswer();
+                        await pc.setLocalDescription(answer);
+                        await sendSignal(room, {sdp: answer, from: username});
                     }
-                } catch(e) { console.error("Error setting remote SDP:", e); }
-            }
-
-            if(msg.ice) {
-                try { await pc.addIceCandidate(new RTCIceCandidate(msg.ice)); } 
-                catch(e) { console.error("Error adding ICE:", e); }
-            }
-        });
-    })();
+                }
+            } catch(e) { console.error("Error setting remote SDP:", e); }
+        }
+        if(msg.ice) {
+            try { await pc.addIceCandidate(new RTCIceCandidate(msg.ice)); } 
+            catch(e) { console.error("Error adding ICE:", e); }
+        }
+    });
 }
 
-// Auto-connect when inputs are filled
-usernameInput.addEventListener("input", startConnection);
-roomInput.addEventListener("input", startConnection);
+// auto-start after 1 second
+setTimeout(() => {
+    startConnection();
+}, 1000);
 
 sendBtn.onclick = () => {
     const msg = msgInput.value.trim();
@@ -155,8 +141,10 @@ sendBtn.onclick = () => {
     msgInput.value = "";
 }
 
-// temporary: toggle host/guest for testing
-document.addEventListener("keydown", e => { if(e.key === "h") isHost = !isHost; console.log("Host mode:", isHost); });
+// toggle host/guest manually with H key
+document.addEventListener("keydown", e => {
+    if(e.key.toLowerCase()==="h") { isHost = !isHost; console.log("Host mode:", isHost); }
+});
 </script>
 
 </body>
