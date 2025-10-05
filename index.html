@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>P2P Chat Room Debug</title>
+<title>P2P Chat Room Simple</title>
 <style>
 body { font-family: sans-serif; margin: 20px; }
 #chat { border: 1px solid #ccc; height: 350px; overflow-y: auto; padding: 10px; margin-bottom: 10px; background: #f9f9f9; }
@@ -16,141 +16,114 @@ input, button { margin: 5px 0; width: 100%; }
 </head>
 <body>
 
-<h2>P2P Chat Room (Verbose Debug)</h2>
+<h2>P2P Chat Room Simple</h2>
 
-<label>Username (visual): <input type="text" id="username" placeholder="e.g. Alice"></label>
-<label>Room ID: <input type="text" id="room" placeholder="e.g. room123"></label>
-<input type="text" id="message" placeholder="Type your message here">
+<label>Username: <input type="text" id="username"></label>
+<label>Room ID: <input type="text" id="room"></label>
+<input type="text" id="message" placeholder="Type your message">
 <button id="sendBtn">Send</button>
 
 <div id="chat"></div>
 
 <script>
 const workerUrl = "https://sparkling-wildflower-9369.devguywastaken.workers.dev/";
-
 const chatDiv = document.getElementById("chat");
-const sendBtn = document.getElementById("sendBtn");
 const usernameInput = document.getElementById("username");
 const roomInput = document.getElementById("room");
 const msgInput = document.getElementById("message");
+const sendBtn = document.getElementById("sendBtn");
 
-let pc, dc;
-let connected = false;
-let isHost = null;
+let pc, dc, connected=false, role=null;
 
-function appendMessage(msg, type="message") {
-    const p = document.createElement("p");
-    p.textContent = msg;
-    p.className = type;
+function append(msg, cls="message") {
+    const p=document.createElement("p");
+    p.textContent=msg;
+    p.className=cls;
     chatDiv.appendChild(p);
-    chatDiv.scrollTop = chatDiv.scrollHeight;
+    chatDiv.scrollTop=chatDiv.scrollHeight;
 }
 
 async function sendSignal(room, data) {
-    try { 
-        await fetch(workerUrl + "?id=" + room, {method:"POST", body:JSON.stringify(data)}); 
-        appendMessage(`Debug: Sent signal to worker: ${JSON.stringify(data)}`, "debug");
-    } catch(e){ appendMessage("Signal send failed: "+e, "system"); }
+    try { await fetch(workerUrl+"?id="+room, {method:"POST", body:JSON.stringify(data)}); }
+    catch(e){ append("Signal send failed: "+e,"system"); }
 }
 
-async function pollSignal(room, username, onMessage) {
+async function pollSignal(room, username, handler) {
     while(!connected) {
         try {
-            const res = await fetch(workerUrl + "?id=" + room);
-            const text = await res.text();
-            appendMessage(`Debug: Raw worker response: ${text}`, "debug");
-            let msgs;
-            try { msgs = JSON.parse(text); } 
-            catch(e) { appendMessage("Worker JSON parse failed", "system"); await new Promise(r => setTimeout(r,1000)); continue; }
-
-            for(const m of msgs) {
-                if(m.from !== username) onMessage(m);
-            }
-        } catch(e){ appendMessage("Polling error: "+e, "system"); }
-        await new Promise(r => setTimeout(r,1000));
+            const res=await fetch(workerUrl+"?id="+room);
+            const text=await res.text();
+            let msgs=[];
+            try{ msgs=JSON.parse(text); }catch(e){ append("Worker JSON parse failed","system"); await new Promise(r=>setTimeout(r,1000)); continue; }
+            for(const m of msgs) if(m.from!==username) handler(m);
+        } catch(e){ append("Polling error: "+e,"system"); }
+        await new Promise(r=>setTimeout(r,1000));
     }
 }
 
 async function startConnection() {
-    const username = usernameInput.value.trim();
-    const room = roomInput.value.trim();
-    if(!username || !room) { appendMessage("Enter username and room ID!", "system"); return; }
+    const username=usernameInput.value.trim();
+    const room=roomInput.value.trim();
+    if(!username||!room) { append("Enter username and room","system"); return; }
     if(pc) return;
 
-    isHost = (username < room) ? true : false;
-    appendMessage(`Role selected: ${isHost ? "Host" : "Guest"}`, "system");
+    pc=new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+    pc.oniceconnectionstatechange=()=>append("ICE state: "+pc.iceConnectionState,"debug");
+    pc.onconnectionstatechange=()=>append("Connection state: "+pc.connectionState,"debug");
+    pc.onsignalingstatechange=()=>append("Signaling state: "+pc.signalingState,"debug");
 
-    pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+    let offerSet=false;
 
-    pc.onconnectionstatechange = () => appendMessage(`Connection state: ${pc.connectionState}`, "debug");
-    pc.onsignalingstatechange = () => appendMessage(`Signaling state: ${pc.signalingState}`, "debug");
-    pc.oniceconnectionstatechange = () => appendMessage(`ICE connection state: ${pc.iceConnectionState}`, "debug");
-
-    if(isHost) {
-        dc = pc.createDataChannel("chat");
-        dc.onopen = () => { appendMessage("✅ DataChannel open as host!", "system"); connected=true; };
-        dc.onclose = () => appendMessage("DataChannel closed", "system");
-        dc.onmessage = e => appendMessage(e.data, "receiver");
+    // DataChannel setup
+    if(!role) role="host"; // first person defaults to host
+    if(role==="host") {
+        dc=pc.createDataChannel("chat");
+        dc.onopen=()=>{ append("✅ DataChannel open as host","system"); connected=true; };
+        dc.onmessage=e=>append(e.data,"receiver");
     } else {
-        pc.ondatachannel = e => {
-            dc = e.channel;
-            dc.onopen = () => { appendMessage("✅ DataChannel open as guest!", "system"); connected=true; };
-            dc.onclose = () => appendMessage("DataChannel closed", "system");
-            dc.onmessage = ev => appendMessage(ev.data, "receiver");
-        };
+        pc.ondatachannel=e=>{ dc=e.channel; dc.onopen=()=>{ append("✅ DataChannel open as guest","system"); connected=true; }; dc.onmessage=e=>append(e.data,"receiver"); };
     }
 
-    pc.onicecandidate = e => { 
-        if(e.candidate) { 
-            appendMessage(`Debug: ICE candidate gathered: ${JSON.stringify(e.candidate)}`, "debug");
-            sendSignal(room, {ice:e.candidate, from: username});
-        }
-    };
+    pc.onicecandidate=e=>{ if(e.candidate) sendSignal(room,{ice:e.candidate,from:username}); };
 
-    if(isHost) {
-        const offer = await pc.createOffer();
-        appendMessage("Debug: Created SDP offer", "debug");
+    if(role==="host") {
+        const offer=await pc.createOffer();
         await pc.setLocalDescription(offer);
-        appendMessage("Debug: Local description set (offer)", "debug");
-        await sendSignal(room, {sdp: offer, from: username});
+        offerSet=true;
+        append("Host: SDP offer created","debug");
+        await sendSignal(room,{sdp:offer,from:username});
     }
 
-    pollSignal(room, username, async msg => {
+    pollSignal(room,username,async msg=>{
         if(msg.sdp) {
-            try {
-                if(!pc.currentRemoteDescription) {
-                    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-                    appendMessage(`Remote SDP set: ${msg.sdp.type}`, "system");
-                    if(msg.sdp.type==="offer" && !isHost) {
-                        const answer = await pc.createAnswer();
-                        appendMessage("Debug: Created SDP answer", "debug");
-                        await pc.setLocalDescription(answer);
-                        appendMessage("Debug: Local description set (answer)", "debug");
-                        await sendSignal(room, {sdp: answer, from: username});
-                    }
+            if(!pc.currentRemoteDescription) {
+                await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+                append("Remote SDP set: "+msg.sdp.type,"system");
+                if(msg.sdp.type==="offer" && role!=="host") {
+                    const answer=await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    append("Guest: SDP answer created and sent","debug");
+                    await sendSignal(room,{sdp:answer,from:username});
                 }
-            } catch(e) { appendMessage("Error setting remote SDP: "+e, "system"); }
+            }
         }
         if(msg.ice) {
-            try { 
-                await pc.addIceCandidate(new RTCIceCandidate(msg.ice));
-                appendMessage("Debug: Added ICE candidate", "debug");
-            } catch(e) { appendMessage("Error adding ICE: "+e, "system"); }
+            try{ await pc.addIceCandidate(new RTCIceCandidate(msg.ice)); append("ICE candidate added","debug"); } 
+            catch(e){ append("Error adding ICE: "+e,"system"); }
         }
     });
 }
 
-sendBtn.onclick = () => {
-    const msg = msgInput.value.trim();
-    if(!msg || !dc || dc.readyState!=="open") { appendMessage("Cannot send: DataChannel not open", "system"); return; }
-    const username = usernameInput.value;
-    dc.send(`${username}: ${msg}`);
-    appendMessage(`You: ${msg}`, "sender");
-    msgInput.value = "";
+sendBtn.onclick=()=>{
+    const msg=msgInput.value.trim();
+    if(!msg||!dc||dc.readyState!=="open") { append("Cannot send: DataChannel not open","system"); return; }
+    dc.send(usernameInput.value+": "+msg);
+    append("You: "+msg,"sender");
+    msgInput.value="";
 }
 
-usernameInput.addEventListener("change", startConnection);
-roomInput.addEventListener("change", startConnection);
+usernameInput.addEventListener("change",startConnection);
+roomInput.addEventListener("change",startConnection);
 </script>
 
 </body>
