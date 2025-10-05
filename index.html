@@ -1,151 +1,169 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Messenger v7</title>
-  <style>
-    body { font-family: sans-serif; background:#0e0e0e; color:white; display:flex; flex-direction:column; align-items:center; padding:20px; }
-    .chat { width:90%; max-width:500px; border:1px solid #444; border-radius:10px; padding:10px; background:#1a1a1a; }
-    .messages { height:300px; overflow-y:auto; border:1px solid #333; border-radius:6px; padding:5px; background:#111; }
-    .msg { margin:4px 0; padding:6px 10px; border-radius:6px; }
-    .msg.you { background:#2a2a2a; text-align:right; }
-    .msg.other { background:#333; text-align:left; }
-    .msg.debug { color:#888; font-size:0.9em; }
-    .bottom { display:flex; gap:6px; margin-top:6px; }
-    .input { flex:1; padding:6px; border:none; border-radius:6px; background:#222; color:white; }
-    .button { padding:6px 10px; background:#3a3a3a; border:none; border-radius:6px; cursor:pointer; color:white; }
-    .config { margin-bottom:10px; display:flex; gap:5px; flex-wrap:wrap; }
-  </style>
+<meta charset="UTF-8">
+<title>STR8 Messenger v9</title>
+<style>
+body {
+  font-family: monospace;
+  background: #0a0a0a;
+  color: #e0e0e0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+}
+#chat {
+  width: 90%;
+  max-width: 600px;
+  height: 70vh;
+  border: 1px solid #333;
+  padding: 10px;
+  overflow-y: auto;
+  background: #111;
+  margin-bottom: 10px;
+}
+#controls {
+  display: flex;
+  gap: 5px;
+}
+input, button {
+  background: #222;
+  color: white;
+  border: 1px solid #333;
+  padding: 5px;
+}
+button:hover { background: #333; }
+</style>
 </head>
 <body>
+<h2>STR8 Messenger v9</h2>
+<div id="chat"></div>
 
-  <div class="chat">
-    <div class="config">
-      <input class="input room" placeholder="Room ID">
-      <input class="input name" placeholder="Username">
-      <select class="input role">
-        <option value="host">Host</option>
-        <option value="guest">Guest</option>
-      </select>
-      <button class="button connect">Connect</button>
-    </div>
+<div id="controls">
+  <input id="roomId" placeholder="Room ID">
+  <input id="username" placeholder="Username">
+  <select id="role">
+    <option value="auto">Auto</option>
+    <option value="host">Host</option>
+    <option value="guest">Guest</option>
+  </select>
+  <button id="connectBtn">Connect</button>
+</div>
 
-    <div class="messages"></div>
+<div id="sendArea" style="margin-top:10px;">
+  <input id="msgBox" placeholder="Type a message" style="width:70%;">
+  <button id="sendBtn">Send</button>
+</div>
 
-    <div class="bottom">
-      <input class="input message" placeholder="Type message...">
-      <button class="button send">Send</button>
-    </div>
-  </div>
+<script>
+const chat = document.getElementById('chat')
+function log(msg) {
+  const div = document.createElement('div')
+  div.textContent = msg
+  chat.appendChild(div)
+  chat.scrollTop = chat.scrollHeight
+}
 
-  <div style="margin-top:10px; color:#777;">Messenger v7</div>
+let pc, channel
+let role = "auto"
+let room = ""
+let name = ""
 
-  <script>
-    const workerURL = 'https://sparkling-wildflower-9369.devguywastaken.workers.dev/';
-    const messagesDiv = document.querySelector('.messages');
-    const roomInput = document.querySelector('.room');
-    const nameInput = document.querySelector('.name');
-    const msgInput = document.querySelector('.message');
-    const sendBtn = document.querySelector('.send');
-    const connectBtn = document.querySelector('.connect');
-    const roleSelect = document.querySelector('.role');
+document.getElementById("connectBtn").onclick = async () => {
+  room = document.getElementById("roomId").value.trim()
+  name = document.getElementById("username").value.trim() || "guest"
+  role = document.getElementById("role").value
+  log(`🔹 Connecting to room [${room}] as ${name} (${role})`)
+  startConnection()
+}
 
-    let pc, channel, room, username, role, connected = false;
+document.getElementById("sendBtn").onclick = () => {
+  if (!channel || channel.readyState !== "open") return log("⚠️ Not connected yet")
+  const msg = document.getElementById("msgBox").value
+  if (!msg) return
+  channel.send(JSON.stringify({ from: name, text: msg }))
+  log(`🟢 You: ${msg}`)
+  document.getElementById("msgBox").value = ""
+}
 
-    function log(text, type='debug') {
-      const div = document.createElement('div');
-      div.className = `msg ${type}`;
-      div.textContent = text;
-      messagesDiv.appendChild(div);
-      messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    }
+async function startConnection() {
+  pc = new RTCPeerConnection()
+  pc.onicecandidate = e => {
+    if (e.candidate) fetch(`https://signal-server.fly.dev/${room}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "ice", candidate: e.candidate, from: role })
+    })
+  }
 
-    connectBtn.onclick = () => startConnection();
-    sendBtn.onclick = () => sendMessage();
+  pc.ondatachannel = e => {
+    channel = e.channel
+    setupChannel()
+    log("🟢 Data channel received.")
+  }
 
-    async function startConnection() {
-      room = roomInput.value.trim();
-      username = nameInput.value.trim() || 'guest';
-      role = roleSelect.value;
-      if (!room) return log('⚠️ enter a room ID first');
-      log(`🔹 Starting as ${role} (${username})...`);
+  if (role === "host" || role === "auto") {
+    log("🟩 Acting as host.")
+    channel = pc.createDataChannel("chat")
+    setupChannel()
 
-      pc = new RTCPeerConnection();
-      pc.onicecandidate = async e => {
-        if (e.candidate) await sendSignal({ ice: e.candidate });
-      };
-      pc.ondatachannel = e => {
-        channel = e.channel;
-        setupChannel();
-      };
+    const offer = await pc.createOffer()
+    await pc.setLocalDescription(offer)
+    log("📤 Sending offer...")
+    await fetch(`https://signal-server.fly.dev/${room}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "offer", sdp: offer, from: "host" })
+    })
+  } else {
+    log("🟦 Acting as guest.")
+  }
 
-      if (role === 'host') {
-        channel = pc.createDataChannel('chat');
-        setupChannel();
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await sendSignal({ sdp: offer });
+  poll()
+}
+
+function setupChannel() {
+  channel.onopen = () => log("✅ Channel open! You can chat now.")
+  channel.onmessage = e => {
+    const msg = JSON.parse(e.data)
+    log(`💬 ${msg.from}: ${msg.text}`)
+  }
+  channel.onclose = () => log("❌ Channel closed.")
+}
+
+async function poll() {
+  while (true) {
+    try {
+      const res = await fetch(`https://signal-server.fly.dev/${room}`)
+      const txt = await res.text()
+      if (!txt || txt === "ok") continue
+      log(`📥 Got signal: ${txt}`)
+      const data = JSON.parse(txt)
+      if (data.type === "offer" && role !== "host") {
+        log("📥 Received offer -> sending answer.")
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp))
+        const answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        await fetch(`https://signal-server.fly.dev/${room}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "answer", sdp: answer, from: "guest" })
+        })
+      } else if (data.type === "answer" && role === "host") {
+        log("📥 Received answer -> connecting.")
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp))
+      } else if (data.type === "ice" && data.candidate) {
+        await pc.addIceCandidate(new RTCIceCandidate(data.candidate))
+        log("🧊 Added ICE candidate.")
       }
-
-      pollSignal();
+    } catch (err) {
+      log("⚠️ Poll error: " + err)
     }
-
-    function setupChannel() {
-      channel.onopen = () => { connected = true; log('✅ connected'); };
-      channel.onmessage = e => log(`${e.data}`, 'other');
-      channel.onclose = () => log('❌ disconnected');
-    }
-
-    async function sendMessage() {
-      if (!connected) return log('not connected yet');
-      const msg = msgInput.value.trim();
-      if (!msg) return;
-      channel.send(username + ': ' + msg);
-      log('you: ' + msg, 'you');
-      msgInput.value = '';
-    }
-
-    async function sendSignal(body) {
-      await fetch(`${workerURL}?id=${room}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...body, from: username })
-      });
-    }
-
-    async function pollSignal() {
-      try {
-        const res = await fetch(`${workerURL}?id=${room}`);
-        const signals = await res.json();
-        if (signals.length) log(`📡 got ${signals.length} signals`);
-        for (const sig of signals) {
-          if (sig.from === username) continue;
-          if (sig.sdp) {
-            await pc.setRemoteDescription(new RTCSessionDescription(sig.sdp));
-            if (sig.sdp.type === 'offer') {
-              const answer = await pc.createAnswer();
-              await pc.setLocalDescription(answer);
-              await sendSignal({ sdp: answer });
-            }
-          } else if (sig.ice) {
-            if (!pc.remoteDescription) {
-              log('⚠️ remoteDescription not set yet, retrying soon');
-            } else {
-              try {
-                await pc.addIceCandidate(sig.ice);
-              } catch (err) {
-                log('⚠️ addIceCandidate failed: ' + err);
-              }
-            }
-          }
-        }
-      } catch (err) {
-        log('polling error: ' + err);
-      }
-      setTimeout(pollSignal, 1000);
-    }
-  </script>
-
+    await new Promise(r => setTimeout(r, 2000))
+  }
+}
+</script>
 </body>
 </html>
