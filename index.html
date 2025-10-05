@@ -40,6 +40,7 @@ function append(msg) {
     chatDiv.scrollTop = chatDiv.scrollHeight;
 }
 
+// send SDP/ICE to worker
 async function sendSignal(room, data) {
     try { 
         const res = await fetch(workerUrl + "?id=" + room, {method:"POST", body:JSON.stringify(data)});
@@ -48,6 +49,7 @@ async function sendSignal(room, data) {
     } catch(e){ console.error("signal send failed", e); }
 }
 
+// poll worker for new messages
 async function pollSignal(room, username, onMessage) {
     while(!connected) {
         try {
@@ -56,16 +58,12 @@ async function pollSignal(room, username, onMessage) {
             console.log("Raw response from worker:", text || "(empty)");
 
             let msgs;
-            try {
-                msgs = JSON.parse(text);
-            } catch(e) {
-                console.error("Failed to parse JSON:", e);
-                await new Promise(r => setTimeout(r, 1000));
-                continue;
-            }
+            try { msgs = JSON.parse(text); } 
+            catch(e) { console.error("Failed to parse JSON:", e); await new Promise(r=>setTimeout(r,1000)); continue; }
 
             for(const m of msgs) {
-                if(m.from !== username) onMessage(m);
+                if(m.from === username) continue; // ignore your own messages
+                onMessage(m);
             }
         } catch(e){ console.error("Fetch failed:", e); }
         await new Promise(r => setTimeout(r, 1000));
@@ -87,10 +85,12 @@ function autoConnect() {
     pc.onicecandidate = e => { if(e.candidate) sendSignal(room, {ice:e.candidate, from: username}); }
 
     (async () => {
+        // create offer
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         await sendSignal(room, {sdp: offer, from: username});
 
+        // poll messages
         pollSignal(room, username, async msg => {
             if(msg.sdp) {
                 if(!pc.currentRemoteDescription) {
@@ -102,7 +102,10 @@ function autoConnect() {
                     }
                 }
             }
-            if(msg.ice) await pc.addIceCandidate(new RTCIceCandidate(msg.ice));
+            if(msg.ice && pc.remoteDescription) {
+                try { await pc.addIceCandidate(new RTCIceCandidate(msg.ice)); }
+                catch(e){ console.error("Failed to add ICE candidate:", e); }
+            }
         });
     })();
 }
@@ -110,7 +113,10 @@ function autoConnect() {
 usernameInput.addEventListener("input", autoConnect);
 roomInput.addEventListener("input", autoConnect);
 
-sendBtn.onclick = () => {
+sendBtn.onclick = () => sendMessage();
+msgInput.addEventListener("keydown", e => { if(e.key === "Enter") sendMessage(); });
+
+function sendMessage() {
     const msg = msgInput.value.trim();
     if(!msg || !dc || dc.readyState!=="open") return;
     const username = usernameInput.value || "You";
