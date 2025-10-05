@@ -2,254 +2,169 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Messenger</title>
+<title>P2P Chat Room</title>
 <style>
-body {
-  background: #0b0b0d;
-  color: white;
-  font-family: system-ui, sans-serif;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  height: 100vh;
-  margin: 0;
-  padding: 20px;
-}
-
-.container {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  max-width: 600px;
-  height: 100%;
-  border: 2px solid #222;
-  border-radius: 12px;
-  background: #141418;
-  overflow: hidden;
-}
-
-.header {
-  padding: 10px;
-  background: #1e1e24;
-  text-align: center;
-  border-bottom: 2px solid #222;
-}
-
-.messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 10px;
-}
-
-.message {
-  padding: 8px 12px;
-  border-radius: 10px;
-  margin-bottom: 8px;
-  word-wrap: break-word;
-}
-
-.message.self { background: #0a84ff; align-self: flex-end; }
-.message.remote { background: #333; align-self: flex-start; }
-.message.debug { background: #222; color: #aaa; font-size: 0.85em; }
-
-.footer {
-  display: flex;
-  padding: 10px;
-  border-top: 2px solid #222;
-  background: #1e1e24;
-}
-
-.footer input {
-  flex: 1;
-  margin-right: 8px;
-  padding: 8px;
-  border-radius: 8px;
-  border: none;
-  outline: none;
-  background: #2a2a32;
-  color: white;
-}
-
-.footer button {
-  padding: 8px 16px;
-  border: none;
-  border-radius: 8px;
-  background: #0a84ff;
-  color: white;
-  cursor: pointer;
-  font-weight: bold;
-}
-
-.footer button:hover {
-  background: #0074f0;
-}
+body { font-family: sans-serif; margin: 20px; }
+#chat { border: 1px solid #ccc; height: 250px; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
+input, button { margin: 5px 0; width: 100%; }
+.status { font-weight: bold; color: blue; }
+.message { margin: 2px 0; }
 </style>
 </head>
 <body>
-<div class="container">
-  <div class="header">
-    <h2>Messenger v6</h2>
-    <div id="status">🔸 Idle</div>
-  </div>
 
-  <div class="messages" id="messages"></div>
+<h2>P2P Chat Room</h2>
 
-  <div class="footer">
-    <input id="room" placeholder="Room ID" style="max-width:100px;margin-right:6px;">
-    <input id="name" placeholder="Name" style="max-width:100px;margin-right:6px;">
-    <input id="message" placeholder="Type a message...">
-    <button id="sendBtn">Send</button>
-  </div>
-</div>
+<label>Username (visual): <input type="text" id="username" placeholder="Enter your name"></label>
+<label>Room ID: <input type="text" id="room" placeholder="Enter room ID"></label>
+<input type="text" id="message" placeholder="Type your message here">
+<button id="sendBtn">Send</button>
+
+<div id="chat"></div>
 
 <script>
-const workerURL = "https://sparkling-wildflower-9369.devguywastaken.workers.dev/";
-let pc, dataChannel;
-let room, username;
+const workerUrl = "https://sparkling-wildflower-9369.devguywastaken.workers.dev/";
+
+const chatDiv = document.getElementById("chat");
+const sendBtn = document.getElementById("sendBtn");
+const usernameInput = document.getElementById("username");
+const roomInput = document.getElementById("room");
+const msgInput = document.getElementById("message");
+
+let pc, dc;
 let connected = false;
-let connectingDots = 0;
-let connectInterval;
-let isHost = false;
+let iceQueue = [];
+let remoteSet = false;
 
-const status = document.getElementById('status');
-const msgBox = document.getElementById('messages');
-const sendBtn = document.getElementById('sendBtn');
-const msgInput = document.getElementById('message');
+// animated connecting
+let connectDots = 0;
+let connectInterval = null;
 
-function addMessage(text, type='debug') {
-  const div = document.createElement('div');
-  div.textContent = text;
-  div.className = `message ${type}`;
-  msgBox.appendChild(div);
-  msgBox.scrollTop = msgBox.scrollHeight;
+function append(msg, cls="message") {
+    const p = document.createElement("p");
+    p.textContent = msg;
+    p.className = cls;
+    chatDiv.appendChild(p);
+    chatDiv.scrollTop = chatDiv.scrollHeight;
 }
 
 function startConnectingAnimation() {
-  connectInterval = setInterval(() => {
-    connectingDots = (connectingDots + 1) % 4;
-    const dots = '.'.repeat(connectingDots);
-    status.textContent = `🟡 Connecting${dots}`;
-  }, 500);
+    if(connectInterval) clearInterval(connectInterval);
+    connectInterval = setInterval(() => {
+        let dots = ".".repeat(connectDots % 4);
+        append(`🔹 Connecting${dots}`, "status");
+        connectDots++;
+    }, 1000);
 }
 
-function stopConnectingAnimation(finalText) {
-  clearInterval(connectInterval);
-  status.textContent = finalText;
+function stopConnectingAnimation() {
+    if(connectInterval) clearInterval(connectInterval);
+    connectDots = 0;
 }
 
-async function sendToWorker(data) {
-  await fetch(`${workerURL}?id=${room}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
-  });
+async function sendSignal(room, data) {
+    try { await fetch(workerUrl + "?id=" + room, {method:"POST", body:JSON.stringify(data)}); }
+    catch(e){ append(`Signal send failed: ${e}`, "status"); }
 }
 
-async function pollWorker() {
-  try {
-    const res = await fetch(`${workerURL}?id=${room}`);
-    const messages = await res.json();
-    if (!Array.isArray(messages)) return;
-    for (const msg of messages) {
-      if (msg.from === username) continue;
-      handleSignal(msg);
+async function pollSignal(room, username, onMessage) {
+    while(!connected) {
+        try {
+            const res = await fetch(workerUrl + "?id=" + room);
+            const text = await res.text();
+            // append(`Raw: ${text}`,"status"); // optional debug
+            let msgs;
+            try { msgs = JSON.parse(text); } 
+            catch(e){ await new Promise(r => setTimeout(r,1000)); continue; }
+            for(const m of msgs){
+                if(m.from !== username) onMessage(m);
+            }
+        } catch(e){ append(`Polling error: ${e}`, "status"); }
+        await new Promise(r => setTimeout(r,1000));
     }
-  } catch (err) {
-    addMessage("Polling error: " + err, "debug");
-  }
 }
 
-function startPolling() {
-  setInterval(pollWorker, 1000);
+function autoConnect() {
+    const username = usernameInput.value.trim();
+    const room = roomInput.value.trim();
+    if(!username || !room) return;
+    if(pc) return;
+
+    append(`🔹 Starting connection as ${username}`, "status");
+    startConnectingAnimation();
+
+    pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+
+    dc = pc.createDataChannel("chat");
+    dc.onmessage = e => append(e.data);
+    dc.onopen = () => {
+        stopConnectingAnimation();
+        append(`✅ Connected to room!`, "status");
+        connected = true;
+        // flush any queued ICE
+        for(const candidate of iceQueue) pc.addIceCandidate(new RTCIceCandidate(candidate));
+        iceQueue = [];
+    };
+
+    pc.onicecandidate = e => { 
+        if(e.candidate){
+            if(remoteSet){
+                sendSignal(room, {ice:e.candidate, from: username});
+                append(`Sent ICE candidate`, "status");
+            } else {
+                iceQueue.push(e.candidate);
+                append(`Queued ICE candidate (waiting for remote)`, "status");
+            }
+        }
+    };
+
+    (async () => {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await sendSignal(room, {sdp: offer, from: username});
+        append("Sent local SDP offer", "status");
+
+        pollSignal(room, username, async msg => {
+            if(msg.sdp){
+                if(!pc.currentRemoteDescription){
+                    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+                    remoteSet = true;
+                    append(`Remote SDP set (${msg.sdp.type})`, "status");
+                    if(msg.sdp.type === "offer"){
+                        const answer = await pc.createAnswer();
+                        await pc.setLocalDescription(answer);
+                        await sendSignal(room, {sdp: answer, from: username});
+                        append("Sent local SDP answer", "status");
+                    }
+                    // flush queued ICE
+                    for(const candidate of iceQueue) pc.addIceCandidate(new RTCIceCandidate(candidate));
+                    iceQueue = [];
+                }
+            }
+            if(msg.ice){
+                if(remoteSet){
+                    await pc.addIceCandidate(new RTCIceCandidate(msg.ice));
+                    append(`Added remote ICE candidate`, "status");
+                } else {
+                    iceQueue.push(msg.ice);
+                    append(`Queued remote ICE candidate (waiting for remoteDescription)`, "status");
+                }
+            }
+        });
+    })();
 }
 
-async function connect() {
-  room = document.getElementById('room').value.trim();
-  username = document.getElementById('name').value.trim() || "guest";
-  if (!room) return addMessage("⚠️ Enter a room ID first", "debug");
-
-  addMessage(`🔹 Starting connection as ${username}`, "debug");
-  startConnectingAnimation();
-
-  pc = new RTCPeerConnection();
-  pc.onicecandidate = e => {
-    if (e.candidate) sendToWorker({ ice: e.candidate, from: username });
-  };
-  pc.ondatachannel = e => {
-    dataChannel = e.channel;
-    setupDataChannel();
-  };
-
-  // check if anyone's in the room yet
-  const res = await fetch(`${workerURL}?id=${room}`);
-  const existing = await res.json();
-  if (existing.length === 0) {
-    isHost = true;
-    dataChannel = pc.createDataChannel("chat");
-    setupDataChannel();
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await sendToWorker({ sdp: offer, from: username });
-    addMessage("🟢 You are host", "debug");
-  } else {
-    isHost = false;
-    addMessage("🟠 You are guest", "debug");
-    for (const msg of existing) handleSignal(msg);
-  }
-
-  startPolling();
-}
-
-async function handleSignal(data) {
-  try {
-    if (data.sdp) {
-      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-      if (data.sdp.type === "offer") {
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        await sendToWorker({ sdp: answer, from: username });
-        addMessage("📡 Sent answer", "debug");
-      }
-    } else if (data.ice) {
-      if (!pc.remoteDescription) return addMessage("⚠️ ICE before remoteDescription", "debug");
-      await pc.addIceCandidate(data.ice);
-    }
-  } catch (err) {
-    addMessage("⚠️ Signal error: " + err.message, "debug");
-  }
-}
-
-function setupDataChannel() {
-  dataChannel.onopen = () => {
-    connected = true;
-    stopConnectingAnimation("🟢 Connected");
-    addMessage("✅ Data channel open!", "debug");
-  };
-  dataChannel.onmessage = e => {
-    addMessage(e.data, "remote");
-  };
-  dataChannel.onclose = () => {
-    connected = false;
-    stopConnectingAnimation("🔴 Disconnected");
-  };
-}
-
-sendBtn.onclick = async () => {
-  if (!connected && !pc) {
-    await connect();
-    return;
-  }
-  const text = msgInput.value.trim();
-  if (!text) return;
-  if (connected && dataChannel?.readyState === "open") {
-    dataChannel.send(`${username}: ${text}`);
-    addMessage(`${username}: ${text}`, "self");
+sendBtn.onclick = () => {
+    const msg = msgInput.value.trim();
+    if(!msg) return;
+    autoConnect(); // try to connect if not yet
+    if(!dc || dc.readyState !== "open") return;
+    const username = usernameInput.value;
+    dc.send(`${username}: ${msg}`);
+    append(`You: ${msg}`);
     msgInput.value = "";
-  } else {
-    addMessage("⚠️ Not connected yet", "debug");
-  }
-};
+}
 </script>
+
 </body>
 </html>
