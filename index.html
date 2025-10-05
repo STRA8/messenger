@@ -37,7 +37,6 @@ let pc;
 let dc;
 let connected = false;
 
-// Display messages in chat box
 function append(msg, type="message") {
     const p = document.createElement("p");
     p.textContent = msg;
@@ -46,7 +45,7 @@ function append(msg, type="message") {
     chatDiv.scrollTop = chatDiv.scrollHeight;
 }
 
-// fetch GitHub commit SHA automatically
+// GitHub commit version
 async function fetchVersion() {
     try {
         const res = await fetch("https://api.github.com/repos/STRA8/messenger/commits/main");
@@ -64,92 +63,72 @@ async function sendSignal(room, data) {
     catch(e){ append("Signal send failed: " + e.message, "system"); }
 }
 
-async function pollSignal(room, username, onMessage) {
+async function pollSignal(room, username) {
     while(!connected) {
         try {
             const res = await fetch(workerUrl + "?id=" + room);
             const text = await res.text();
-            append("Raw worker response: " + text, "system");
-
-            let msgs;
-            try {
-                msgs = JSON.parse(text);
-            } catch(e) {
-                append("Failed to parse JSON: " + e.message, "system");
-                await new Promise(r=>setTimeout(r, 1000));
-                continue;
-            }
+            let msgs = [];
+            try { msgs = JSON.parse(text); } catch(e){ append("Invalid JSON from worker", "system"); }
 
             for(const m of msgs) {
-                if(m.from !== username) onMessage(m);
+                if(m.from !== username) {
+                    if(m.sdp) {
+                        append("Received SDP from " + m.from, "system");
+                        if(!pc.currentRemoteDescription) {
+                            await pc.setRemoteDescription(new RTCSessionDescription(m.sdp));
+                            if(m.sdp.type === "offer") {
+                                const answer = await pc.createAnswer();
+                                await pc.setLocalDescription(answer);
+                                await sendSignal(room, {sdp: answer, from: username});
+                            }
+                        }
+                    }
+                    if(m.ice) {
+                        append("Received ICE from " + m.from, "system");
+                        await pc.addIceCandidate(new RTCIceCandidate(m.ice));
+                    }
+                }
             }
         } catch(e){ append("Polling error: " + e.message, "system"); }
         await new Promise(r=>setTimeout(r, 1000));
     }
 }
 
-async function autoConnect() {
+async function startConnection() {
+    if(pc) return; // already connecting/connected
     const username = usernameInput.value.trim();
     const room = roomInput.value.trim();
-    if(!username || !room) return;
-    if(pc) return;
+    if(!username || !room) {
+        append("Enter username and room ID first", "system");
+        return;
+    }
 
-    // Determine if host (first in room)
-    let isHost = false;
-    try {
-        const res = await fetch(workerUrl + "?id=" + room);
-        const text = await res.text();
-        let msgs = [];
-        try { msgs = JSON.parse(text); } catch{}
-        isHost = msgs.length === 0;
-    } catch(e){ append("Error checking host: " + e.message, "system"); }
-
-    append(isHost ? "✅ You are the host" : "✅ Starting connection as guest...", "system");
+    append("🔹 Starting connection...", "system");
 
     pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
-
     dc = pc.createDataChannel("chat");
+
+    dc.onopen = () => { append("✅ Connected!", "system"); connected = true; }
     dc.onmessage = e => append(e.data);
-    dc.onopen = () => { append("✅ Connected to room!", "system"); connected = true; }
 
     pc.onicecandidate = e => { if(e.candidate) sendSignal(room, {ice:e.candidate, from: username}); }
 
-    (async () => {
-        try {
-            if(isHost) {
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                await sendSignal(room, {sdp: offer, from: username});
-            }
+    // first person to send message becomes host (creates offer)
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await sendSignal(room, {sdp: offer, from: username});
 
-            pollSignal(room, username, async msg => {
-                if(msg.sdp) {
-                    if(!pc.currentRemoteDescription) {
-                        append("Received SDP from " + msg.from, "system");
-                        await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-                        if(msg.sdp.type === "offer") {
-                            const answer = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-                            await sendSignal(room, {sdp: answer, from: username});
-                        }
-                    }
-                }
-                if(msg.ice) {
-                    append("Received ICE candidate from " + msg.from, "system");
-                    await pc.addIceCandidate(new RTCIceCandidate(msg.ice));
-                }
-            });
-        } catch(e){ append("Connection error: " + e.message, "system"); }
-    })();
+    pollSignal(room, username);
 }
 
-usernameInput.addEventListener("input", autoConnect);
-roomInput.addEventListener("input", autoConnect);
+sendBtn.onclick = async () => {
+    if(!pc) await startConnection();
 
-sendBtn.onclick = () => {
     const msg = msgInput.value.trim();
-    if(!msg || !dc || dc.readyState!=="open") return;
-    const username = usernameInput.value || "You";
+    if(!msg || !dc || dc.readyState !== "open") return;
+
+    const username = usernameInput.value;
     dc.send(`${username}: ${msg}`);
     append(`${username}: ${msg}`);
     msgInput.value = "";
