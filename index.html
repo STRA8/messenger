@@ -5,164 +5,112 @@
 <title>P2P Chat Room</title>
 <style>
 body { font-family: sans-serif; margin: 20px; }
-#chat { border: 1px solid #ccc; height: 250px; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
-input, button { margin: 5px 0; width: 100%; }
-.status { font-weight: bold; color: blue; }
-.message { margin: 2px 0; }
+.chat-box { border: 1px solid #ccc; height: 250px; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
+input, button { margin: 5px 0; width: 100%; padding:5px; }
+.info { color: blue; font-style: italic; }
 </style>
 </head>
 <body>
 
 <h2>P2P Chat Room</h2>
 
-<label>Username (visual): <input type="text" id="username" placeholder="Enter your name"></label>
-<label>Room ID: <input type="text" id="room" placeholder="Enter room ID"></label>
-<input type="text" id="message" placeholder="Type your message here">
-<button id="sendBtn">Send</button>
+<label>Username (visual): <input class="username" type="text" placeholder="e.g. Alice"></label>
+<label>Room ID: <input class="room" type="text" placeholder="e.g. abc123"></label>
+<input class="message" type="text" placeholder="Type your message here">
+<button class="sendBtn">Send</button>
 
-<div id="chat"></div>
+<div class="chat-box"></div>
 
 <script>
 const workerUrl = "https://sparkling-wildflower-9369.devguywastaken.workers.dev/";
 
-const chatDiv = document.getElementById("chat");
-const sendBtn = document.getElementById("sendBtn");
-const usernameInput = document.getElementById("username");
-const roomInput = document.getElementById("room");
-const msgInput = document.getElementById("message");
+const chatDiv = document.querySelector(".chat-box");
+const sendBtn = document.querySelector(".sendBtn");
+const usernameInput = document.querySelector(".username");
+const roomInput = document.querySelector(".room");
+const msgInput = document.querySelector(".message");
 
-let pc, dc;
-let connected = false;
-let iceQueue = [];
-let remoteSet = false;
+let pc, dc, connected=false, isHost=false;
 
-// animated connecting
-let connectDots = 0;
-let connectInterval = null;
-
-function append(msg, cls="message") {
+function append(msg, type="") {
     const p = document.createElement("p");
     p.textContent = msg;
-    p.className = cls;
+    if(type) p.classList.add(type);
     chatDiv.appendChild(p);
     chatDiv.scrollTop = chatDiv.scrollHeight;
 }
 
-function startConnectingAnimation() {
-    if(connectInterval) clearInterval(connectInterval);
-    connectInterval = setInterval(() => {
-        let dots = ".".repeat(connectDots % 4);
-        append(`🔹 Connecting${dots}`, "status");
-        connectDots++;
-    }, 1000);
+async function sendSignal(room, data){
+    try { await fetch(workerUrl + "?id="+room, {method:"POST", body:JSON.stringify(data)}); }
+    catch(e){ append("⚠ Signal send failed: "+e,"info"); }
 }
 
-function stopConnectingAnimation() {
-    if(connectInterval) clearInterval(connectInterval);
-    connectDots = 0;
-}
-
-async function sendSignal(room, data) {
-    try { await fetch(workerUrl + "?id=" + room, {method:"POST", body:JSON.stringify(data)}); }
-    catch(e){ append(`Signal send failed: ${e}`, "status"); }
-}
-
-async function pollSignal(room, username, onMessage) {
-    while(!connected) {
+async function pollSignal(room, username, onMessage){
+    while(!connected){
         try {
-            const res = await fetch(workerUrl + "?id=" + room);
+            const res = await fetch(workerUrl+"?id="+room);
             const text = await res.text();
-            // append(`Raw: ${text}`,"status"); // optional debug
             let msgs;
-            try { msgs = JSON.parse(text); } 
-            catch(e){ await new Promise(r => setTimeout(r,1000)); continue; }
+            try { msgs = JSON.parse(text); } catch(e){ append("⚠ JSON parse failed","info"); await new Promise(r=>setTimeout(r,800)); continue; }
+
             for(const m of msgs){
                 if(m.from !== username) onMessage(m);
             }
-        } catch(e){ append(`Polling error: ${e}`, "status"); }
-        await new Promise(r => setTimeout(r,1000));
+        } catch(e){ append("⚠ Poll error: "+e,"info"); }
+        await new Promise(r=>setTimeout(r,800));
     }
 }
 
-function autoConnect() {
+function startConnection(){
     const username = usernameInput.value.trim();
     const room = roomInput.value.trim();
     if(!username || !room) return;
     if(pc) return;
 
-    append(`🔹 Starting connection as ${username}`, "status");
-    startConnectingAnimation();
+    append("🔹 Starting connection...", "info");
 
     pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
 
     dc = pc.createDataChannel("chat");
-    dc.onmessage = e => append(e.data);
-    dc.onopen = () => {
-        stopConnectingAnimation();
-        append(`✅ Connected to room!`, "status");
-        connected = true;
-        // flush any queued ICE
-        for(const candidate of iceQueue) pc.addIceCandidate(new RTCIceCandidate(candidate));
-        iceQueue = [];
-    };
+    dc.onmessage = e=>append(e.data);
+    dc.onopen = ()=>{ append("✅ Connected to room!"); connected=true; }
 
-    pc.onicecandidate = e => { 
-        if(e.candidate){
-            if(remoteSet){
-                sendSignal(room, {ice:e.candidate, from: username});
-                append(`Sent ICE candidate`, "status");
-            } else {
-                iceQueue.push(e.candidate);
-                append(`Queued ICE candidate (waiting for remote)`, "status");
-            }
-        }
-    };
+    pc.onicecandidate = e=>{ if(e.candidate) sendSignal(room,{ice:e.candidate, from:username}); }
 
-    (async () => {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await sendSignal(room, {sdp: offer, from: username});
-        append("Sent local SDP offer", "status");
+    (async ()=>{
+        try{
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            isHost = true;
+            append("⭐ You are the host", "info");
+            await sendSignal(room,{sdp:offer, from:username});
+        } catch(e){ append("⚠ Offer error: "+e,"info"); }
 
-        pollSignal(room, username, async msg => {
-            if(msg.sdp){
-                if(!pc.currentRemoteDescription){
-                    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-                    remoteSet = true;
-                    append(`Remote SDP set (${msg.sdp.type})`, "status");
-                    if(msg.sdp.type === "offer"){
-                        const answer = await pc.createAnswer();
-                        await pc.setLocalDescription(answer);
-                        await sendSignal(room, {sdp: answer, from: username});
-                        append("Sent local SDP answer", "status");
+        pollSignal(room, username, async msg=>{
+            try{
+                if(msg.sdp){
+                    if(!pc.currentRemoteDescription){
+                        await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+                        if(msg.sdp.type==="offer" && !isHost){
+                            const answer = await pc.createAnswer();
+                            await pc.setLocalDescription(answer);
+                            await sendSignal(room,{sdp:answer, from:username});
+                        }
                     }
-                    // flush queued ICE
-                    for(const candidate of iceQueue) pc.addIceCandidate(new RTCIceCandidate(candidate));
-                    iceQueue = [];
                 }
-            }
-            if(msg.ice){
-                if(remoteSet){
-                    await pc.addIceCandidate(new RTCIceCandidate(msg.ice));
-                    append(`Added remote ICE candidate`, "status");
-                } else {
-                    iceQueue.push(msg.ice);
-                    append(`Queued remote ICE candidate (waiting for remoteDescription)`, "status");
-                }
-            }
+                if(msg.ice) await pc.addIceCandidate(new RTCIceCandidate(msg.ice));
+            } catch(e){ append("⚠ ICE/SDP error: "+e,"info"); }
         });
     })();
 }
 
-sendBtn.onclick = () => {
+sendBtn.onclick = ()=>{
     const msg = msgInput.value.trim();
-    if(!msg) return;
-    autoConnect(); // try to connect if not yet
-    if(!dc || dc.readyState !== "open") return;
+    if(!msg || !dc || dc.readyState!=="open"){ startConnection(); return; }
     const username = usernameInput.value;
     dc.send(`${username}: ${msg}`);
     append(`You: ${msg}`);
-    msgInput.value = "";
+    msgInput.value="";
 }
 </script>
 
