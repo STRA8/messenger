@@ -5,7 +5,7 @@
 <title>P2P Chat Room</title>
 <style>
 body { font-family: sans-serif; margin: 20px; }
-#chat { border: 1px solid #ccc; height: 250px; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
+#chat { border: 1px solid #ccc; height: 300px; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
 input, button { margin: 5px 0; width: 100%; }
 .message { margin: 2px 0; }
 .system { color: green; font-weight: bold; }
@@ -17,8 +17,8 @@ input, button { margin: 5px 0; width: 100%; }
 
 <h2>P2P Chat Room</h2>
 
-<label>Username (visual): <input type="text" id="username"></label>
-<label>Room ID: <input type="text" id="room"></label>
+<label>Username (visual): <input type="text" id="username" placeholder="e.g. Alice"></label>
+<label>Room ID: <input type="text" id="room" placeholder="e.g. room123"></label>
 <input type="text" id="message" placeholder="Type your message here">
 <button id="sendBtn">Send</button>
 
@@ -35,9 +35,8 @@ const msgInput = document.getElementById("message");
 
 let pc, dc;
 let connected = false;
-let isHost = false;
+let isHost = null; // auto select host
 
-// helper to show messages in chat
 function appendMessage(msg, type="message") {
     const p = document.createElement("p");
     p.textContent = msg;
@@ -49,9 +48,8 @@ function appendMessage(msg, type="message") {
 // send message to worker
 async function sendSignal(room, data) {
     try { 
-        console.log("Sending signal:", data);
         await fetch(workerUrl + "?id=" + room, {method:"POST", body:JSON.stringify(data)}); 
-    } catch(e){ console.error("Signal send failed:", e); }
+    } catch(e){ appendMessage("Signal send failed: "+e, "system"); }
 }
 
 // poll worker for messages
@@ -60,17 +58,15 @@ async function pollSignal(room, username, onMessage) {
         try {
             const res = await fetch(workerUrl + "?id=" + room);
             const text = await res.text();
-            console.log("Raw response from worker:", text);
-
             let msgs;
             try { msgs = JSON.parse(text); } 
-            catch(e) { console.error("Failed to parse JSON:", e); await new Promise(r => setTimeout(r, 1000)); continue; }
+            catch(e) { appendMessage("Worker JSON parse failed", "system"); await new Promise(r => setTimeout(r,1000)); continue; }
 
             for(const m of msgs) {
                 if(m.from !== username) onMessage(m);
             }
-        } catch(e){ console.error(e); }
-        await new Promise(r => setTimeout(r, 1000));
+        } catch(e){ appendMessage("Polling error: "+e, "system"); }
+        await new Promise(r => setTimeout(r,1000));
     }
 }
 
@@ -78,10 +74,12 @@ async function pollSignal(room, username, onMessage) {
 async function startConnection() {
     const username = usernameInput.value.trim();
     const room = roomInput.value.trim();
-    if(!username || !room) { console.log("Username or room empty"); return; }
+    if(!username || !room) { appendMessage("Enter username and room ID!", "system"); return; }
     if(pc) return;
 
-    console.log("Starting connection as", isHost ? "host" : "guest");
+    // auto select host based on lexicographic order
+    isHost = (username < room) ? true : false;
+    appendMessage("Starting connection as " + (isHost?"host":"guest"), "system");
 
     pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
 
@@ -101,50 +99,46 @@ async function startConnection() {
         if(e.candidate) sendSignal(room, {ice:e.candidate, from: username});
     };
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await sendSignal(room, {sdp: offer, from: username});
+    // only host creates offer
+    if(isHost) {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await sendSignal(room, {sdp: offer, from: username});
+    }
 
     pollSignal(room, username, async msg => {
-        console.log("Incoming message:", msg);
         if(msg.sdp) {
             try {
                 if(!pc.currentRemoteDescription) {
                     await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-                    console.log("Remote SDP set:", msg.sdp.type);
+                    appendMessage("Remote SDP set: " + msg.sdp.type, "system");
                     if(msg.sdp.type==="offer" && !isHost) {
                         const answer = await pc.createAnswer();
                         await pc.setLocalDescription(answer);
                         await sendSignal(room, {sdp: answer, from: username});
                     }
                 }
-            } catch(e) { console.error("Error setting remote SDP:", e); }
+            } catch(e) { appendMessage("Error setting remote SDP: "+e, "system"); }
         }
         if(msg.ice) {
             try { await pc.addIceCandidate(new RTCIceCandidate(msg.ice)); } 
-            catch(e) { console.error("Error adding ICE:", e); }
+            catch(e) { appendMessage("Error adding ICE: "+e, "system"); }
         }
     });
 }
 
-// auto-start after 1 second
-setTimeout(() => {
-    startConnection();
-}, 1000);
-
 sendBtn.onclick = () => {
     const msg = msgInput.value.trim();
     if(!msg || !dc || dc.readyState!=="open") return;
-    const username = usernameInput.value || "You";
+    const username = usernameInput.value;
     dc.send(`${username}: ${msg}`);
     appendMessage(`You: ${msg}`, "sender");
     msgInput.value = "";
 }
 
-// toggle host/guest manually with H key
-document.addEventListener("keydown", e => {
-    if(e.key.toLowerCase()==="h") { isHost = !isHost; console.log("Host mode:", isHost); }
-});
+// start connection automatically after user types both fields
+usernameInput.addEventListener("change", startConnection);
+roomInput.addEventListener("change", startConnection);
 </script>
 
 </body>
