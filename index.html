@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>P2P Chat Auto-Connect</title>
+<title>P2P Chat Room</title>
 <style>
 body { font-family: sans-serif; margin: 20px; }
 #chat { border: 1px solid #ccc; height: 250px; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
@@ -11,10 +11,10 @@ input, button { margin: 5px 0; width: 100%; }
 </head>
 <body>
 
-<h2>P2P Chat</h2>
+<h2>P2P Chat Room</h2>
 
-<label>Your ID: <input type="text" id="userId" placeholder="e.g. alice"></label>
-<label>Peer ID: <input type="text" id="peerId" placeholder="e.g. bob"></label>
+<label>Username (visual): <input type="text" id="username" placeholder="e.g. Alice"></label>
+<label>Room ID: <input type="text" id="room" placeholder="e.g. abc123"></label>
 <input type="text" id="message" placeholder="Type your message here">
 <button id="sendBtn">Send</button>
 
@@ -25,15 +25,14 @@ const workerUrl = "https://sparkling-wildflower-9369.devguywastaken.workers.dev/
 
 const chatDiv = document.getElementById("chat");
 const sendBtn = document.getElementById("sendBtn");
-const userIdInput = document.getElementById("userId");
-const peerIdInput = document.getElementById("peerId");
+const usernameInput = document.getElementById("username");
+const roomInput = document.getElementById("room");
 const msgInput = document.getElementById("message");
 
 let pc;
 let dc;
 let connected = false;
 
-// append messages to chat box
 function append(msg) {
     const p = document.createElement("p");
     p.textContent = msg;
@@ -41,52 +40,52 @@ function append(msg) {
     chatDiv.scrollTop = chatDiv.scrollHeight;
 }
 
-// send signaling to worker
-async function sendSignal(id, data) {
-    try { await fetch(workerUrl + "?id=" + id, {method:"POST", body:JSON.stringify(data)}); }
+async function sendSignal(room, data) {
+    try { await fetch(workerUrl + "?id=" + room, {method:"POST", body:JSON.stringify(data)}); }
     catch(e){ console.error("signal send failed", e); }
 }
 
-// poll worker for messages
-async function pollSignal(id, onMessage) {
+async function pollSignal(room, username, onMessage) {
     while(!connected) {
         try {
-            const res = await fetch(workerUrl + "?id=" + id);
+            const res = await fetch(workerUrl + "?id=" + room);
             const msgs = await res.json();
-            for(const m of msgs) onMessage(JSON.parse(m));
-        } catch(e) { console.error(e); }
+            for(const m of msgs) {
+                if(m.from !== username) onMessage(JSON.parse(m));
+            }
+        } catch(e){ console.error(e); }
         await new Promise(r => setTimeout(r, 1000));
     }
 }
 
-// auto-connect once both IDs are entered
 function autoConnect() {
-    const userId = userIdInput.value.trim();
-    const peerId = peerIdInput.value.trim();
-    if(!userId || !peerId) return;
-
-    if(pc) return; // already connecting
+    const username = usernameInput.value.trim();
+    const room = roomInput.value.trim();
+    if(!username || !room) return;
+    if(pc) return;
 
     pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
 
     dc = pc.createDataChannel("chat");
     dc.onmessage = e => append(e.data);
-    dc.onopen = () => { append("✅ Connected to peer!"); connected = true; }
+    dc.onopen = () => { append("✅ Connected to room!"); connected = true; }
 
-    pc.onicecandidate = e => { if(e.candidate) sendSignal(peerId, {ice:e.candidate}); }
+    pc.onicecandidate = e => { if(e.candidate) sendSignal(room, {ice:e.candidate, from: username}); }
 
     (async () => {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        await sendSignal(peerId, {sdp: offer});
+        await sendSignal(room, {sdp: offer, from: username});
 
-        pollSignal(userId, async msg => {
+        pollSignal(room, username, async msg => {
             if(msg.sdp) {
-                await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-                if(msg.sdp.type === "offer") {
-                    const answer = await pc.createAnswer();
-                    await pc.setLocalDescription(answer);
-                    await sendSignal(peerId, {sdp: answer});
+                if(!pc.currentRemoteDescription) {
+                    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+                    if(msg.sdp.type === "offer") {
+                        const answer = await pc.createAnswer();
+                        await pc.setLocalDescription(answer);
+                        await sendSignal(room, {sdp: answer, from: username});
+                    }
                 }
             }
             if(msg.ice) await pc.addIceCandidate(new RTCIceCandidate(msg.ice));
@@ -94,16 +93,14 @@ function autoConnect() {
     })();
 }
 
-// watch for IDs typed
-userIdInput.addEventListener("input", autoConnect);
-peerIdInput.addEventListener("input", autoConnect);
+usernameInput.addEventListener("input", autoConnect);
+roomInput.addEventListener("input", autoConnect);
 
-// send chat message
 sendBtn.onclick = () => {
     const msg = msgInput.value.trim();
     if(!msg || !dc || dc.readyState!=="open") return;
-    const from = userIdInput.value || "You";
-    dc.send(`${from}: ${msg}`);
+    const username = usernameInput.value || "You";
+    dc.send(`${username}: ${msg}`);
     append(`You: ${msg}`);
     msgInput.value = "";
 }
