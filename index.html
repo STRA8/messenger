@@ -41,30 +41,33 @@ function append(msg) {
 }
 
 async function sendSignal(room, data) {
-    try { await fetch(workerUrl + "?id=" + room, {method:"POST", body:JSON.stringify(data)}); }
-    catch(e){ console.error("signal send failed", e); }
+    try { 
+        const res = await fetch(workerUrl + "?id=" + room, {method:"POST", body:JSON.stringify(data)});
+        const text = await res.text();
+        console.log("Worker POST response:", text);
+    } catch(e){ console.error("signal send failed", e); }
 }
 
 async function pollSignal(room, username, onMessage) {
     while(!connected) {
         try {
             const res = await fetch(workerUrl + "?id=" + room);
-            const text = await res.text();  // get raw response text
-            console.log("Raw response from worker:", text);  // <-- debug
+            const text = await res.text();
+            console.log("Raw response from worker:", text || "(empty)");
 
             let msgs;
             try {
-                msgs = JSON.parse(text);   // try parsing
+                msgs = JSON.parse(text);
             } catch(e) {
                 console.error("Failed to parse JSON:", e);
                 await new Promise(r => setTimeout(r, 1000));
-                continue;  // skip this iteration
+                continue;
             }
 
             for(const m of msgs) {
                 if(m.from !== username) onMessage(m);
             }
-        } catch(e){ console.error(e); }
+        } catch(e){ console.error("Fetch failed:", e); }
         await new Promise(r => setTimeout(r, 1000));
     }
 }
