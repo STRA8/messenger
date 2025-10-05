@@ -33,6 +33,7 @@ let pc;
 let dc;
 let connected = false;
 let iceQueue = [];
+let isInitiator = false;
 
 function append(msg) {
     const p = document.createElement("p");
@@ -50,21 +51,22 @@ async function sendSignal(room, data) {
     } catch(e){ console.error("signal send failed", e); }
 }
 
-async function pollSignal(room, username, onMessage) {
+async function pollSignal(room, username) {
     while(!connected) {
         try {
             const res = await fetch(workerUrl + "?id=" + room);
             const text = await res.text();
-            //console.log("Raw response from worker:", text);
             let msgs;
             try { msgs = JSON.parse(text); } catch(e){ await new Promise(r => setTimeout(r, 1000)); continue; }
 
             for(const m of msgs) {
-                if(m.from === username) continue; // skip own
+                if(m.from === username) continue;
+
                 if(m.sdp) {
                     if(!pc.currentRemoteDescription) {
                         await pc.setRemoteDescription(new RTCSessionDescription(m.sdp));
                         if(m.sdp.type === "offer") {
+                            // receiver creates answer
                             const answer = await pc.createAnswer();
                             await pc.setLocalDescription(answer);
                             await sendSignal(room, {sdp: answer, from: username});
@@ -84,39 +86,50 @@ async function pollSignal(room, username, onMessage) {
     }
 }
 
-function autoConnect() {
+async function autoConnect() {
     const username = usernameInput.value.trim();
     const room = roomInput.value.trim();
     if(!username || !room) return;
     if(pc) return;
 
+    // Check if room is empty to decide initiator
+    const res = await fetch(workerUrl + "?id=" + room);
+    const msgs = JSON.parse(await res.text());
+    isInitiator = msgs.length === 0;
+
     pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
 
-    dc = pc.createDataChannel("chat");
-    dc.onmessage = e => append(e.data);
-    dc.onopen = () => { append("✅ Connected to room!"); connected = true; console.log("Data channel open"); }
-    dc.onclose = () => console.log("Data channel closed");
-    dc.onerror = e => console.error("Data channel error:", e);
+    if(isInitiator) {
+        // initiator creates data channel
+        dc = pc.createDataChannel("chat");
+        dc.onmessage = e => append(e.data);
+        dc.onopen = () => { append("✅ Connected to room!"); connected = true; };
+    } else {
+        // receiver listens for incoming data channel
+        pc.ondatachannel = e => {
+            dc = e.channel;
+            dc.onmessage = e => append(e.data);
+            dc.onopen = () => { append("✅ Connected to room!"); connected = true; };
+        };
+    }
 
     pc.onicecandidate = e => { if(e.candidate) sendSignal(room, {ice:e.candidate, from: username}); }
 
-    (async () => {
+    if(isInitiator) {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         await sendSignal(room, {sdp: offer, from: username});
+    }
 
-        pollSignal(room, username, msg => {
-            // messages handled inside pollSignal
-        });
+    pollSignal(room, username);
 
-        // add queued ICE candidates after remoteDescription is set
-        const checkQueue = setInterval(async () => {
-            if(pc.remoteDescription && iceQueue.length) {
-                for(const ice of iceQueue) await pc.addIceCandidate(new RTCIceCandidate(ice));
-                iceQueue = [];
-            }
-        }, 500);
-    })();
+    // add queued ICE candidates after remoteDescription is set
+    const checkQueue = setInterval(async () => {
+        if(pc.remoteDescription && iceQueue.length) {
+            for(const ice of iceQueue) await pc.addIceCandidate(new RTCIceCandidate(ice));
+            iceQueue = [];
+        }
+    }, 500);
 }
 
 usernameInput.addEventListener("input", autoConnect);
