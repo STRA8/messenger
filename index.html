@@ -2,155 +2,161 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Simple P2P Chat</title>
+<title>P2P Chat Room</title>
 <style>
 body { font-family: sans-serif; margin: 20px; }
-.chat-container { max-width: 400px; margin: auto; }
-.chat-log { border: 1px solid #ccc; height: 250px; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
-.input-group { margin-bottom: 10px; }
-.input-group input { width: 100%; padding: 5px; box-sizing: border-box; }
-.input-group button { width: 100%; padding: 5px; }
+#chat { border: 1px solid #ccc; height: 250px; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
+input, button { margin: 5px 0; width: 100%; }
 .message { margin: 2px 0; }
-.message.you { font-weight: bold; }
-.message.system { font-style: italic; color: gray; }
+.system { color: green; font-weight: bold; }
+.sender { color: blue; }
+.receiver { color: darkorange; }
 </style>
 </head>
 <body>
 
-<div class="chat-container">
-    <h2>P2P Chat Room</h2>
+<h2>P2P Chat Room</h2>
 
-    <div class="input-group">
-        <input class="username" type="text" placeholder="Your name (visual)">
-    </div>
-    <div class="input-group">
-        <input class="room" type="text" placeholder="Room ID">
-    </div>
-    <div class="input-group">
-        <input class="message-input" type="text" placeholder="Type your message here">
-    </div>
-    <div class="input-group">
-        <button class="send-btn">Send</button>
-    </div>
+<label>Username (visual): <input type="text" id="username" placeholder="e.g. Alice"></label>
+<label>Room ID: <input type="text" id="room" placeholder="e.g. abc123"></label>
+<input type="text" id="message" placeholder="Type your message here">
+<button id="sendBtn">Send</button>
 
-    <div class="chat-log"></div>
-</div>
+<div id="chat"></div>
 
 <script>
 const workerUrl = "https://sparkling-wildflower-9369.devguywastaken.workers.dev/";
 
-const chatLog = document.querySelector(".chat-log");
-const usernameInput = document.querySelector(".username");
-const roomInput = document.querySelector(".room");
-const messageInput = document.querySelector(".message-input");
-const sendBtn = document.querySelector(".send-btn");
+const chatDiv = document.getElementById("chat");
+const sendBtn = document.getElementById("sendBtn");
+const usernameInput = document.getElementById("username");
+const roomInput = document.getElementById("room");
+const msgInput = document.getElementById("message");
 
 let pc, dc;
 let connected = false;
-let iceQueue = [];
 let isHost = false;
+let autoStarted = false;
 
-function appendMessage(text, type="") {
+function appendMessage(msg, type="message") {
     const p = document.createElement("p");
-    p.className = `message ${type}`;
-    p.textContent = text;
-    chatLog.appendChild(p);
-    chatLog.scrollTop = chatLog.scrollHeight;
+    p.textContent = msg;
+    p.className = type;
+    chatDiv.appendChild(p);
+    chatDiv.scrollTop = chatDiv.scrollHeight;
 }
 
 async function sendSignal(room, data) {
-    try {
-        await fetch(workerUrl + "?id=" + room, {
-            method:"POST",
-            body: JSON.stringify(data)
-        });
-    } catch(e){ console.error("signal send failed", e); }
+    try { await fetch(workerUrl + "?id=" + room, {method:"POST", body:JSON.stringify(data)}); }
+    catch(e){ console.error("Signal send failed:", e); }
 }
 
-async function pollSignal(room, username) {
+async function pollSignal(room, username, onMessage) {
     while(!connected) {
         try {
             const res = await fetch(workerUrl + "?id=" + room);
-            const msgs = JSON.parse(await res.text());
+            const text = await res.text();
+            console.log("Raw response from worker:", text);
+
+            let msgs;
+            try { msgs = JSON.parse(text); } 
+            catch(e) { console.error("Failed to parse JSON:", e); await new Promise(r => setTimeout(r, 1000)); continue; }
 
             for(const m of msgs) {
-                if(m.from === username) continue;
+                if(m.from !== username) onMessage(m);
+            }
+        } catch(e){ console.error(e); }
+        await new Promise(r => setTimeout(r, 1000));
+    }
+}
 
-                if(m.sdp) {
+function startConnection() {
+    const username = usernameInput.value.trim();
+    const room = roomInput.value.trim();
+    if(!username || !room) return;
+    if(autoStarted) return;
+    autoStarted = true;
+
+    pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+    console.log("RTCPeerConnection created");
+
+    // Host creates the data channel
+    if(!isHost) {
+        dc = pc.createDataChannel("chat");
+        dc.onopen = () => { 
+            appendMessage("✅ Connected as host!", "system"); 
+            connected = true; 
+        };
+        dc.onmessage = e => appendMessage(e.data, "receiver");
+    }
+
+    pc.onicecandidate = e => {
+        console.log("ICE candidate:", e.candidate);
+        if(e.candidate) sendSignal(room, {ice:e.candidate, from: username});
+    };
+
+    pc.onconnectionstatechange = () => {
+        console.log("Connection state changed:", pc.connectionState);
+    };
+
+    // Guest listens for incoming data channel
+    pc.ondatachannel = e => {
+        dc = e.channel;
+        dc.onopen = () => { appendMessage("✅ Connected as guest!", "system"); connected = true; };
+        dc.onmessage = ev => appendMessage(ev.data, "receiver");
+        dc.onclose = () => console.log("Data channel closed");
+    };
+
+    (async () => {
+        if(isHost) {
+            console.log("Hosting room:", room);
+        } else {
+            console.log("Joining room:", room);
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            await sendSignal(room, {sdp: offer, from: username});
+        }
+
+        pollSignal(room, username, async msg => {
+            console.log("Incoming message:", msg);
+
+            if(msg.sdp) {
+                try {
                     if(!pc.currentRemoteDescription) {
-                        await pc.setRemoteDescription(new RTCSessionDescription(m.sdp));
-                        if(m.sdp.type === "offer") {
+                        await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+                        console.log("Remote SDP set:", msg.sdp.type);
+                        if(msg.sdp.type === "offer") {
                             const answer = await pc.createAnswer();
                             await pc.setLocalDescription(answer);
                             await sendSignal(room, {sdp: answer, from: username});
                         }
-                        for(const ice of iceQueue) if(ice.candidate) await pc.addIceCandidate(new RTCIceCandidate(ice));
-                        iceQueue = [];
                     }
-                }
-
-                if(m.ice && m.ice.candidate) {
-                    if(pc.remoteDescription) {
-                        await pc.addIceCandidate(new RTCIceCandidate(m.ice));
-                    } else {
-                        iceQueue.push(m.ice);
-                    }
-                }
+                } catch(e) { console.error("Error setting remote SDP:", e); }
             }
-        } catch(e){ console.error(e); }
-        await new Promise(r => setTimeout(r, 500));
-    }
+
+            if(msg.ice) {
+                try { await pc.addIceCandidate(new RTCIceCandidate(msg.ice)); } 
+                catch(e) { console.error("Error adding ICE:", e); }
+            }
+        });
+    })();
 }
 
-async function startConnection() {
-    const username = usernameInput.value.trim();
-    const room = roomInput.value.trim();
-    if(!username || !room) return;
-    if(pc) return;
-
-    // Check if room is empty -> first person is host
-    const res = await fetch(workerUrl + "?id=" + room);
-    const msgs = JSON.parse(await res.text());
-    isHost = msgs.length === 0;
-
-    pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
-
-    if(isHost) {
-        dc = pc.createDataChannel("chat");
-        dc.onmessage = e => appendMessage(e.data);
-        dc.onopen = () => { appendMessage("✅ Connected as host!", "system"); connected = true; };
-    } else {
-        pc.ondatachannel = e => {
-            dc = e.channel;
-            dc.onmessage = e => appendMessage(e.data);
-            dc.onopen = () => { appendMessage("✅ Connected as guest!", "system"); connected = true; };
-        };
-    }
-
-    pc.onicecandidate = e => { if(e.candidate) sendSignal(room, {ice:e.candidate, from: username}); }
-
-    if(isHost) {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await sendSignal(room, {sdp: offer, from: username});
-    }
-
-    pollSignal(room, username);
-}
-
-// auto-connect when user fills inputs
+// Auto-connect when inputs are filled
 usernameInput.addEventListener("input", startConnection);
 roomInput.addEventListener("input", startConnection);
 
 sendBtn.onclick = () => {
-    if(!connected) { appendMessage("⚠️ Not connected yet!", "system"); return; }
-    const msg = messageInput.value.trim();
-    if(!msg) return;
+    const msg = msgInput.value.trim();
+    if(!msg || !dc || dc.readyState!=="open") return;
     const username = usernameInput.value || "You";
     dc.send(`${username}: ${msg}`);
-    appendMessage(`You: ${msg}`, "you");
-    messageInput.value = "";
-};
+    appendMessage(`You: ${msg}`, "sender");
+    msgInput.value = "";
+}
+
+// temporary: toggle host/guest for testing
+document.addEventListener("keydown", e => { if(e.key === "h") isHost = !isHost; console.log("Host mode:", isHost); });
 </script>
 
 </body>
