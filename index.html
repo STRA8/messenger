@@ -88,13 +88,23 @@ async function pollSignal(room, username, onMessage) {
     }
 }
 
-function autoConnect() {
+async function autoConnect() {
     const username = usernameInput.value.trim();
     const room = roomInput.value.trim();
     if(!username || !room) return;
     if(pc) return;
 
-    append("Starting connection as guest...", "system");
+    // Determine if host (first in room)
+    let isHost = false;
+    try {
+        const res = await fetch(workerUrl + "?id=" + room);
+        const text = await res.text();
+        let msgs = [];
+        try { msgs = JSON.parse(text); } catch{}
+        isHost = msgs.length === 0;
+    } catch(e){ append("Error checking host: " + e.message, "system"); }
+
+    append(isHost ? "✅ You are the host" : "✅ Starting connection as guest...", "system");
 
     pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
 
@@ -106,9 +116,11 @@ function autoConnect() {
 
     (async () => {
         try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            await sendSignal(room, {sdp: offer, from: username});
+            if(isHost) {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                await sendSignal(room, {sdp: offer, from: username});
+            }
 
             pollSignal(room, username, async msg => {
                 if(msg.sdp) {
